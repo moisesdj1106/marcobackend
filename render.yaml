@@ -1,0 +1,30 @@
+# Configuración para Render.com
+services:
+  - type: web
+    name: antigravity-backend
+    env: node
+    region: oregon  # oregon, frankfurt, singapore, ohio
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 4000
+      - key: JWT_SECRET
+        generateValue: true
+      - key: SESSION_SECRET
+        generateValue: true
+    # Variables que debes configurar manualmente en el dashboard de Render:
+    # - DB_USER, DB_PASSWORD, DB_HOST, DB_NAME, DB_PORT
+    # - STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY
+    # - FRONTEND_URL (URL de tu frontend en Netlify)
+    
+databases:
+  - name: antigravity-db
+    databaseName: antigravity_db
+    user: antigravity_user
+    region: oregon
+    plan: free  # free, starter, standard, pro
+    # Para producción, recomiendo al menos starter plan
