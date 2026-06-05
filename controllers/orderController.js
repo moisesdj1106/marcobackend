@@ -323,26 +323,61 @@ async function getMyOrders(req, res, next) {
  */
 async function getAllOrders(req, res, next) {
   try {
-    const query = `
-      SELECT o.*, u.name as user_name, u.email as user_email,
-             COALESCE(json_agg(
-               json_build_object(
-                 'id', oi.id,
-                 'product_id', oi.product_id,
-                 'product_name', p.name,
-                 'quantity', oi.quantity,
-                 'unit_price', oi.unit_price,
-                 'image_url', p.image_url
-               )
-             ) FILTER (WHERE oi.id IS NOT NULL), '[]') as items
-      FROM orders o
-      LEFT JOIN users u ON o.user_id = u.id
-      LEFT JOIN order_items oi ON o.id = oi.order_id
-      LEFT JOIN products p ON oi.product_id = p.id
-      GROUP BY o.id, u.name, u.email
-      ORDER BY o.created_at DESC
-    `;
-    const result = await db.query(query);
+    // Soportar filtros: status, customer, date_from, date_to, min_total, max_total
+    const { status, customer, date_from, date_to, min_total, max_total, limit } = req.query;
+    const params = [];
+    const where = [];
+
+    if (status) {
+      params.push(status);
+      where.push(`o.status = $${params.length}`);
+    }
+    if (customer) {
+      params.push(`%${customer}%`);
+      where.push(`(o.billing_name ILIKE $${params.length} OR u.email ILIKE $${params.length} OR u.name ILIKE $${params.length})`);
+    }
+    if (date_from) {
+      params.push(date_from);
+      where.push(`o.created_at >= $${params.length}`);
+    }
+    if (date_to) {
+      params.push(date_to);
+      where.push(`o.created_at <= $${params.length}`);
+    }
+    if (min_total) {
+      params.push(min_total);
+      where.push(`o.total_amount >= $${params.length}`);
+    }
+    if (max_total) {
+      params.push(max_total);
+      where.push(`o.total_amount <= $${params.length}`);
+    }
+
+    let query = `SELECT o.*, u.name as user_name, u.email as user_email,
+                        COALESCE(json_agg(
+                          json_build_object(
+                            'id', oi.id,
+                            'product_id', oi.product_id,
+                            'product_name', p.name,
+                            'quantity', oi.quantity,
+                            'unit_price', oi.unit_price,
+                            'image_url', p.image_url
+                          )
+                        ) FILTER (WHERE oi.id IS NOT NULL), '[]') as items
+                 FROM orders o
+                 LEFT JOIN users u ON o.user_id = u.id
+                 LEFT JOIN order_items oi ON o.id = oi.order_id
+                 LEFT JOIN products p ON oi.product_id = p.id`;
+
+    if (where.length > 0) {
+      query += ' WHERE ' + where.join(' AND ');
+    }
+
+    query += ' GROUP BY o.id, u.name, u.email ORDER BY o.created_at DESC';
+    const maxLimit = Math.min( Number(limit) || 1000, 5000 );
+    query += ` LIMIT ${maxLimit}`;
+
+    const result = await db.query(query, params);
     return res.json(result.rows);
   } catch (error) {
     next(error);
