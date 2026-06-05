@@ -35,10 +35,10 @@ const pool = new Pool(poolConfig);
 // Probar conexión
 pool.query('SELECT NOW()', (err, res) => {
   if (err) {
-    console.error('❌ Error al conectar a PostgreSQL:', err.message);
+    console.error(' Error al conectar a PostgreSQL:', err.message);
     console.error('Detalles SSL:', poolConfig.ssl ? 'SSL activado' : 'SSL desactivado');
   } else {
-    console.log('✅ Conexión a PostgreSQL establecida con éxito.');
+    console.log(' Conexión a PostgreSQL establecida con éxito.');
     console.log('Modo:', process.env.NODE_ENV || 'development');
     console.log('SSL:', poolConfig.ssl ? 'activado' : 'desactivado');
   }
