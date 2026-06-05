@@ -40,12 +40,22 @@ async function getAuditLogs(req, res, next) {
       query += ' WHERE ' + where.join(' AND ');
     }
 
+    const pageNumber = Math.max(Number(req.query.page) || 1, 1);
+    const pageSize = Math.min(Math.max(Number(req.query.pageSize) || 10, 1), 50);
+    const offset = (pageNumber - 1) * pageSize;
+
+    // Obtener total para paginación
+    const countQuery = `SELECT COUNT(*) AS total
+                        FROM audit_logs a
+                        LEFT JOIN users u ON a.user_id = u.id${where.length > 0 ? ' WHERE ' + where.join(' AND ') : ''}`;
+    const countResult = await db.query(countQuery, params);
+    const total = Number(countResult.rows[0]?.total || 0);
+
     query += ' ORDER BY a.created_at DESC';
-    const maxLimit = Math.min( Number(limit) || 200, 1000 );
-    query += ` LIMIT ${maxLimit}`;
+    query += ` LIMIT ${pageSize} OFFSET ${offset}`;
 
     const result = await db.query(query, params);
-    return res.json(result.rows);
+    return res.json({ logs: result.rows, total, page: pageNumber, pageSize });
   } catch (error) {
     next(error);
   }
