@@ -332,19 +332,28 @@ async function handleChat(req, res, next) {
     // Intención: solicitar factura / nota
     if (text.includes('factura') || text.includes('solicitar factura') || text.includes('nota fiscal')) {
       if (!user) return res.json({ type: 'text', content: 'Debes iniciar sesión para solicitar factura.' });
-      // Buscar número de orden en el texto
-      const idMatch = text.match(/orden\s*(\d+)/);
+      // Buscar número de orden en el texto. Soporta 'orden 9', 'ORD-9', 'ord-9' o 'factura 9'
+      const idMatch = text.match(/orden\s*#?\s*(\d+)/i) || text.match(/ord[-\s]*#?\s*(\d+)/i) || text.match(/factura\s*#?\s*(\d+)/i);
       const orderId = idMatch ? parseInt(idMatch[1],10) : null;
-      if (!orderId) return res.json({ type: 'text', content: 'Indica el ID de la orden para la cual solicitas factura. Ej: "Factura orden 123"' });
-      // Intentar insertar en tabla invoices si existe
+      if (!orderId) return res.json({ type: 'text', content: 'Indica el ID de la orden para la cual solicitas factura. Ej: "Factura orden 123" o "Factura ORD-123"' });
+      // Verificar que la orden existe y pertenece al usuario
+      const orderCheck = await db.query('SELECT id FROM orders WHERE id = $1 AND user_id = $2', [orderId, user.id]);
+      if (orderCheck.rows.length === 0) return res.json({ type: 'text', content: `No encontré la orden ${orderId}. Verifica el número e inténtalo de nuevo.` });
+
+      // Intentar insertar en tabla invoices si existe; si la tabla no existe, registrar la solicitud en logs y devolver instrucción SQL
       try {
         const insert = await db.query('INSERT INTO invoices (order_id, user_id, requested_at, data) VALUES ($1,$2,now(), $3) RETURNING id', [orderId, user.id, JSON.stringify({ requested_by: user.email })]);
         await logAction(user.id, user.email, 'CHAT_REQUESTED_INVOICE', 'invoices', insert.rows[0].id, { orderId });
-        return res.json({ type: 'invoice', message: 'Solicitud de factura registrada. El admin será notificado.', invoiceId: insert.rows[0].id });
+        return res.json({ type: 'invoice', message: 'Solicitud de factura registrada. El admin será notificado.', invoiceId: insert.rows[0].id, orderId });
       } catch (err) {
-        // Tabla invoices no existe -> sugerir SQL
+        // Si falla por falta de tabla (relation "invoices" does not exist) o similar, registrar en audit y devolver SQL sugerido junto con confirmación temporal
         const sql = `-- Crear tabla invoices\nCREATE TABLE invoices (\n  id serial PRIMARY KEY,\n  order_id integer REFERENCES orders(id),\n  user_id integer REFERENCES users(id),\n  requested_at timestamptz DEFAULT now(),\n  data jsonb\n);`;
-        return res.json({ type: 'text', content: 'No encontré soporte para facturas en la BD. Aquí tienes el SQL sugerido para crear la tabla invoices:', sql });
+        try {
+          await logAction(user.id, user.email, 'CHAT_REQUESTED_INVOICE_NO_TABLE', 'invoices', null, { orderId });
+        } catch (e) {
+          console.warn('No se pudo escribir log de invoice request', e.message);
+        }
+        return res.json({ type: 'invoice', message: 'Solicitud registrada (temporal). La tabla de facturas no existe en la base de datos; comunica al admin para crearla.', orderId, sql });
       }
     }
 
