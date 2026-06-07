@@ -366,8 +366,12 @@ async function handleChat(req, res, next) {
       }
     }
 
-    // Intención: información de la empresa
-    if (text.includes('ubicación') || text.includes('dirección') || text.includes('mision') || text.includes('visión') || text.includes('vision') || text.includes('misión')) {
+    // Intención: información de la empresa (cubrir variantes sin/ con acentos y sinónimos como 'donde')
+    if (
+      text.includes('ubicación') || text.includes('ubicacion') || text.includes('dirección') || text.includes('direccion') ||
+      text.includes('mision') || text.includes('misión') || text.includes('vision') || text.includes('visión') ||
+      text.includes('donde') || text.includes('dónde') || text.includes('ubicados') || text.includes('ubicado')
+    ) {
       // Intentar leer tabla company_info
       try {
         const r = await db.query('SELECT key, value FROM company_info');
@@ -375,15 +379,22 @@ async function handleChat(req, res, next) {
         const info = {};
         for (const row of r.rows) info[row.key] = row.value;
         const payload = {};
-        if (text.includes('ubicación') || text.includes('dirección')) payload.content = info.location || info.address || 'No hay dirección registrada.';
-        else if (text.includes('mision') || text.includes('misión')) payload.content = info.mission || 'No hay misión registrada.';
-        else if (text.includes('vision') || text.includes('visión')) payload.content = info.vision || 'No hay visión registrada.';
-        else payload.content = info;
+        if (text.includes('ubicación') || text.includes('ubicacion') || text.includes('dirección') || text.includes('direccion') || text.includes('donde') || text.includes('dónde') || text.includes('ubicado') || text.includes('ubicados')) {
+          payload.content = info.location || info.address || 'No hay dirección registrada.';
+        } else if (text.includes('mision') || text.includes('misión')) {
+          payload.content = info.mission || 'No hay misión registrada.';
+        } else if (text.includes('vision') || text.includes('visión')) {
+          payload.content = info.vision || 'No hay visión registrada.';
+        } else payload.content = info;
         return res.json({ type: 'text', content: payload.content, raw: payload });
       } catch (err) {
         // Sugerir SQL para crear la tabla si no existe
-        const sql = `-- Crear tabla company_info (clave/valor)\nCREATE TABLE company_info (\n  key text PRIMARY KEY,\n  value text\n);\n\nINSERT INTO company_info (key, value) VALUES\n('address', 'Dirección de la empresa aquí'),\n('location', 'Ciudad, País'),\n('mission', 'Nuestra misión...'),\n('vision', 'Nuestra visión...');`;
-        return res.json({ type: 'text', content: 'No encontré la información de la empresa en la base de datos. Si quieres, crea la tabla con el SQL que te proporciono.', sql });
+        const envAddress = process.env.COMPANY_ADDRESS || null;
+        const envLocation = process.env.COMPANY_LOCATION || null;
+        const fallbackAddress = envAddress || 'Dirección no configurada (ej: Calle Principal 123)';
+        const fallbackLocation = envLocation || 'Ciudad, País';
+        const fallbackMsg = `No encontré la información de la empresa en la base de datos. Dirección sugerida: ${fallbackAddress} (${fallbackLocation}). Si quieres que sea permanente, crea la tabla con el SQL que te proporciono.`;
+        return res.json({ type: 'text', content: fallbackMsg, sql });
       }
     }
 
