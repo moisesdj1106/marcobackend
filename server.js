@@ -9,6 +9,7 @@ const productRoutes = require('./routes/productRoutes');
 const orderRoutes = require('./routes/orderRoutes');
 const reportRoutes = require('./routes/reportRoutes');
 const auditRoutes = require('./routes/auditRoutes');
+const chatRoutes = require('./routes/chatRoutes');
 
 // Importar Manejo de Errores
 const errorHandler = require('./middleware/errorHandler');
@@ -43,6 +44,7 @@ app.use('/api/products', productRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/audit', auditRoutes);
+app.use('/api/chat', chatRoutes);
 
 // Ruta de estado del servidor
 app.get('/health', (req, res) => {
