@@ -157,6 +157,159 @@ async function handleChat(req, res, next) {
       }
     }
 
+    // Intención: guardar borrador / presupuesto (no afecta stock)
+    if (text.includes('borrador') || text.includes('presupuesto') || text.includes('guardar borrador')) {
+      if (!user) return res.json({ type: 'text', content: 'Debes iniciar sesión para guardar un borrador.' });
+      let items = Array.isArray(orderItems) ? orderItems.slice() : [];
+      if ((!items || items.length === 0) && (text.includes('presupuesto') || text.includes('borrador') )) {
+        // intentar parsear como en crear orden
+        const after = text.split(/presupuesto|borrador/)[1] || '';
+        const parts = after.split(/,| y |;|\band\b/).map(p => p.trim()).filter(Boolean);
+        for (const part of parts) {
+          const m = part.match(/(\d+)\s+(.+)/);
+          if (m) items.push({ name: m[2].trim(), quantity: parseInt(m[1],10) });
+        }
+      }
+      if (!items || items.length === 0) return res.json({ type: 'text', content: 'Envíame los productos para el borrador, ejemplo: "Presupuesto 2 Bujía NGK, 1 Batería"' });
+      const client = await db.pool.connect();
+      try {
+        await client.query('BEGIN');
+        let subtotal = 0;
+        const checkedItems = [];
+        for (const item of items) {
+          let product = null;
+          if (item.product_id) {
+            const pr = await client.query('SELECT * FROM products WHERE id = $1', [item.product_id]);
+            if (pr.rows.length === 0) return res.json({ type: 'text', content: `Producto ${item.product_id} no existe.` });
+            product = pr.rows[0];
+          } else if (item.name) {
+            const pr = await client.query('SELECT * FROM products WHERE name ILIKE $1 ORDER BY stock DESC LIMIT 1', [`%${item.name}%`]);
+            if (pr.rows.length === 0) return res.json({ type: 'text', content: `No encontré: ${item.name}` });
+            product = pr.rows[0];
+          }
+          const qty = Number(item.quantity) || 1;
+          subtotal += parseFloat(product.price) * qty;
+          checkedItems.push({ product_id: product.id, quantity: qty, unit_price: parseFloat(product.price), name: product.name });
+        }
+        const tax = Number((subtotal * 0.16).toFixed(2));
+        const total = Number((subtotal + tax).toFixed(2));
+        // Insertar orden en estado 'draft'
+        const insertOrder = `INSERT INTO orders (user_id, status, subtotal, tax_amount, total_amount, billing_name, billing_email, payment_intent_id) VALUES ($1, 'draft', $2, $3, $4, $5, $6, $7) RETURNING id`;
+        const orderRes = await client.query(insertOrder, [user.id, subtotal, tax, total, user.name || user.email, user.email, `draft_${Date.now()}`]);
+        const orderId = orderRes.rows[0].id;
+        for (const it of checkedItems) {
+          await client.query('INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES ($1,$2,$3,$4)', [orderId, it.product_id, it.quantity, it.unit_price]);
+        }
+        await client.query('COMMIT');
+        await logAction(user.id, user.email, 'CHAT_SAVED_DRAFT', 'orders', orderId, { total, items: checkedItems });
+        return res.json({ type: 'draft', message: 'Borrador guardado con éxito.', orderId, total, items: checkedItems });
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+
+    // Intención: reservar/apartar carrito (bloquear stock por X horas)
+    if (text.includes('reservar') || text.includes('apartar') || text.includes('apartado')) {
+      if (!user) return res.json({ type: 'text', content: 'Debes iniciar sesión para apartar productos.' });
+      const hoursMatch = text.match(/(\d+)\s*(horas|hrs|h)/);
+      const hours = hoursMatch ? parseInt(hoursMatch[1],10) : 2; // por defecto 2 horas
+      let items = Array.isArray(orderItems) ? orderItems.slice() : [];
+      if ((!items || items.length === 0) && (text.includes('reservar') || text.includes('apartar'))) {
+        const after = text.split(/reservar|apartar/)[1] || '';
+        const parts = after.split(/,| y |;|\band\b/).map(p => p.trim()).filter(Boolean);
+        for (const part of parts) {
+          const m = part.match(/(\d+)\s+(.+)/);
+          if (m) items.push({ name: m[2].trim(), quantity: parseInt(m[1],10) });
+        }
+      }
+      if (!items || items.length === 0) return res.json({ type: 'text', content: 'Envíame los productos a reservar. Ej: "Reservar 2 Bujía NGK por 4 horas"' });
+
+      const client = await db.pool.connect();
+      try {
+        await client.query('BEGIN');
+        // Intentaremos insertar en tabla reservations; si no existe devolveremos SQL sugerido
+        const expiresAt = new Date(Date.now() + hours * 3600 * 1000);
+        // Mapear productos y validar stock
+        const checkedItems = [];
+        for (const item of items) {
+          let product = null;
+          if (item.product_id) {
+            const pr = await client.query('SELECT * FROM products WHERE id = $1 FOR UPDATE', [item.product_id]);
+            if (pr.rows.length === 0) return res.json({ type: 'text', content: `Producto ${item.product_id} no existe.` });
+            product = pr.rows[0];
+          } else if (item.name) {
+            const pr = await client.query('SELECT * FROM products WHERE name ILIKE $1 ORDER BY stock DESC LIMIT 1 FOR UPDATE', [`%${item.name}%`]);
+            if (pr.rows.length === 0) return res.json({ type: 'text', content: `No encontré: ${item.name}` });
+            product = pr.rows[0];
+          }
+          const qty = Number(item.quantity) || 1;
+          if (product.stock < qty) return res.json({ type: 'text', content: `Stock insuficiente para ${product.name}. Disponible: ${product.stock}` });
+          checkedItems.push({ product_id: product.id, quantity: qty, unit_price: parseFloat(product.price), name: product.name, image_url: product.image_url });
+        }
+
+        // Crear reservation
+        let reservationId;
+        try {
+          const resInsert = await client.query('INSERT INTO reservations (user_id, status, expires_at) VALUES ($1, $2, $3) RETURNING id', [user.id, 'reserved', expiresAt]);
+          reservationId = resInsert.rows[0].id;
+        } catch (err) {
+          // Tabla reservations no existe -> devolver SQL sugerido
+          await client.query('ROLLBACK');
+          const sql = `-- Crear tablas para reservas\nCREATE TABLE reservations (\n  id serial PRIMARY KEY,\n  user_id integer REFERENCES users(id),\n  status text,\n  expires_at timestamptz,\n  created_at timestamptz DEFAULT now()\n);\n\nCREATE TABLE reservation_items (\n  id serial PRIMARY KEY,\n  reservation_id integer REFERENCES reservations(id),\n  product_id integer REFERENCES products(id),\n  quantity integer,\n  unit_price numeric\n);`;
+          return res.json({ type: 'text', content: 'No encontré soporte para reservas en la base de datos. Aquí tienes el SQL para crear las tablas de reservas:', sql });
+        }
+
+        for (const it of checkedItems) {
+          await client.query('INSERT INTO reservation_items (reservation_id, product_id, quantity, unit_price) VALUES ($1,$2,$3,$4)', [reservationId, it.product_id, it.quantity, it.unit_price]);
+          // Restar stock para apartar
+          const upd = await client.query('UPDATE products SET stock = stock - $1 WHERE id = $2 AND stock >= $1 RETURNING stock', [it.quantity, it.product_id]);
+          if (upd.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.json({ type: 'text', content: `Error al reservar ${it.name}. Stock insuficiente.` });
+          }
+        }
+
+        await client.query('COMMIT');
+        await logAction(user.id, user.email, 'CHAT_CREATED_RESERVATION', 'reservations', reservationId, { expiresAt, items: checkedItems });
+        return res.json({ type: 'reservation', message: `Productos apartados hasta ${expiresAt.toISOString()}`, reservationId, expiresAt, items: checkedItems });
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+
+    // Intención: historial personal de órdenes
+    if (text.includes('mis ordenes') || text.includes('mis órdenes') || text.includes('mis compras') || text.includes('historial')) {
+      if (!user) return res.json({ type: 'text', content: 'Debes iniciar sesión para ver tu historial de órdenes.' });
+      const query = `SELECT o.id, o.status, o.total_amount, o.created_at, COALESCE(json_agg(json_build_object('product_id', oi.product_id, 'quantity', oi.quantity, 'unit_price', oi.unit_price, 'product_name', p.name)) FILTER (WHERE oi.id IS NOT NULL), '[]') as items FROM orders o LEFT JOIN order_items oi ON o.id = oi.order_id LEFT JOIN products p ON oi.product_id = p.id WHERE o.user_id = $1 GROUP BY o.id ORDER BY o.created_at DESC LIMIT 50`;
+      const result = await db.query(query, [user.id]);
+      return res.json({ type: 'my_orders', orders: result.rows });
+    }
+
+    // Intención: solicitar factura / nota
+    if (text.includes('factura') || text.includes('solicitar factura') || text.includes('nota fiscal')) {
+      if (!user) return res.json({ type: 'text', content: 'Debes iniciar sesión para solicitar factura.' });
+      // Buscar número de orden en el texto
+      const idMatch = text.match(/orden\s*(\d+)/);
+      const orderId = idMatch ? parseInt(idMatch[1],10) : null;
+      if (!orderId) return res.json({ type: 'text', content: 'Indica el ID de la orden para la cual solicitas factura. Ej: "Factura orden 123"' });
+      // Intentar insertar en tabla invoices si existe
+      try {
+        const insert = await db.query('INSERT INTO invoices (order_id, user_id, requested_at, data) VALUES ($1,$2,now(), $3) RETURNING id', [orderId, user.id, JSON.stringify({ requested_by: user.email })]);
+        await logAction(user.id, user.email, 'CHAT_REQUESTED_INVOICE', 'invoices', insert.rows[0].id, { orderId });
+        return res.json({ type: 'invoice', message: 'Solicitud de factura registrada. El admin será notificado.', invoiceId: insert.rows[0].id });
+      } catch (err) {
+        // Tabla invoices no existe -> sugerir SQL
+        const sql = `-- Crear tabla invoices\nCREATE TABLE invoices (\n  id serial PRIMARY KEY,\n  order_id integer REFERENCES orders(id),\n  user_id integer REFERENCES users(id),\n  requested_at timestamptz DEFAULT now(),\n  data jsonb\n);`;
+        return res.json({ type: 'text', content: 'No encontré soporte para facturas en la BD. Aquí tienes el SQL sugerido para crear la tabla invoices:', sql });
+      }
+    }
+
     // Intención: información de la empresa
     if (text.includes('ubicación') || text.includes('dirección') || text.includes('mision') || text.includes('visión') || text.includes('vision') || text.includes('misión')) {
       // Intentar leer tabla company_info
