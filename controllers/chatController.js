@@ -309,8 +309,23 @@ async function handleChat(req, res, next) {
     // Intención: historial personal de órdenes
     if (text.includes('mis ordenes') || text.includes('mis órdenes') || text.includes('mis compras') || text.includes('mis pedidos') || text.includes('historial')) {
       if (!user) return res.json({ type: 'text', content: 'Debes iniciar sesión para ver tu historial de órdenes.' });
-      const query = `SELECT o.id, o.status, o.total_amount, o.created_at, COALESCE(json_agg(json_build_object('product_id', oi.product_id, 'quantity', oi.quantity, 'unit_price', oi.unit_price, 'product_name', p.name)) FILTER (WHERE oi.id IS NOT NULL), '[]') as items FROM orders o LEFT JOIN order_items oi ON o.id = oi.order_id LEFT JOIN products p ON oi.product_id = p.id WHERE o.user_id = $1 GROUP BY o.id ORDER BY o.created_at DESC LIMIT 50`;
-      const result = await db.query(query, [user.id]);
+      const queryWithInvoices = `SELECT o.id, o.status, o.total_amount, o.created_at,
+        COALESCE(json_agg(DISTINCT json_build_object('product_id', oi.product_id, 'quantity', oi.quantity, 'unit_price', oi.unit_price, 'product_name', p.name)) FILTER (WHERE oi.id IS NOT NULL), '[]') as items,
+        MAX(i.id) as invoice_id
+        FROM orders o
+        LEFT JOIN order_items oi ON o.id = oi.order_id
+        LEFT JOIN products p ON oi.product_id = p.id
+        LEFT JOIN invoices i ON i.order_id = o.id
+        WHERE o.user_id = $1
+        GROUP BY o.id
+        ORDER BY o.created_at DESC LIMIT 50`;
+      let result;
+      try {
+        result = await db.query(queryWithInvoices, [user.id]);
+      } catch (err) {
+        const fallbackQuery = `SELECT o.id, o.status, o.total_amount, o.created_at, COALESCE(json_agg(json_build_object('product_id', oi.product_id, 'quantity', oi.quantity, 'unit_price', oi.unit_price, 'product_name', p.name)) FILTER (WHERE oi.id IS NOT NULL), '[]') as items FROM orders o LEFT JOIN order_items oi ON o.id = oi.order_id LEFT JOIN products p ON oi.product_id = p.id WHERE o.user_id = $1 GROUP BY o.id ORDER BY o.created_at DESC LIMIT 50`;
+        result = await db.query(fallbackQuery, [user.id]);
+      }
       return res.json({ type: 'my_orders', orders: result.rows });
     }
 
