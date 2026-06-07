@@ -39,8 +39,18 @@ async function handleChat(req, res, next) {
       const nameMatch = message.match(/producto[:\s]+(.+)/i) || message.match(/buscar producto\s+(.+)/i);
       const nameQuery = nameMatch ? nameMatch[1].trim() : null;
       if (nameQuery) {
-        const q = `SELECT id, name, price, stock, image_url FROM products WHERE name ILIKE $1 LIMIT 20`;
-        const r = await db.query(q, [`%${nameQuery}%`]);
+        let q, r;
+        try {
+          q = `SELECT id, name, price, stock, image_url FROM products WHERE unaccent(name) ILIKE unaccent($1) LIMIT 20`;
+          r = await db.query(q, [`%${nameQuery}%`]);
+          if (r.rows.length === 0) {
+            q = `SELECT id, name, price, stock, image_url FROM products WHERE name ILIKE $1 LIMIT 20`;
+            r = await db.query(q, [`%${nameQuery}%`]);
+          }
+        } catch (err) {
+          q = `SELECT id, name, price, stock, image_url FROM products WHERE name ILIKE $1 LIMIT 20`;
+          r = await db.query(q, [`%${nameQuery}%`]);
+        }
         if (r.rows.length === 0) return res.json({ type: 'text', content: 'No encontré productos con ese nombre.' });
         return res.json({ type: 'list', title: `Resultados para "${nameQuery}"`, items: r.rows });
       }
@@ -60,11 +70,27 @@ async function handleChat(req, res, next) {
       // intentar extraer nombre
       const nameMatch = message.match(/stock\s+de\s+(.+)/i) || message.match(/stock\s+(.+)/i) || message.match(/existencia\s+de\s+(.+)/i) || message.match(/hay\s+(.+)/i);
       if (nameMatch) {
-        const nameQuery = nameMatch[1].trim();
-        const q = 'SELECT id, name, stock FROM products WHERE name ILIKE $1 LIMIT 1';
-        const r = await db.query(q, [`%${nameQuery}%`]);
-        if (r.rows.length === 0) return res.json({ type: 'text', content: 'No encontré productos con ese nombre.' });
-        return res.json({ type: 'stock', product: r.rows[0] });
+        let nameQuery = nameMatch[1].trim();
+        // limpiar posibles signos terminales
+        nameQuery = nameQuery.replace(/["'\?\.!]$/,'').trim();
+
+        // Intentar búsqueda tolerante a acentos usando la extensión unaccent si está disponible
+        try {
+          const q = 'SELECT id, name, stock FROM products WHERE unaccent(name) ILIKE unaccent($1) LIMIT 1';
+          let r = await db.query(q, [`%${nameQuery}%`]);
+          // Si no hay coincidencias, intentar búsqueda simple ILIKE como fallback
+          if (r.rows.length === 0) {
+            r = await db.query('SELECT id, name, stock FROM products WHERE name ILIKE $1 LIMIT 1', [`%${nameQuery}%`]);
+          }
+          if (r.rows.length === 0) return res.json({ type: 'text', content: 'No encontré productos con ese nombre.' });
+          return res.json({ type: 'stock', product: r.rows[0] });
+        } catch (err) {
+          // Si la función unaccent no existe o hay otro error, usar ILIKE normal
+          const q = 'SELECT id, name, stock FROM products WHERE name ILIKE $1 LIMIT 1';
+          const r = await db.query(q, [`%${nameQuery}%`]);
+          if (r.rows.length === 0) return res.json({ type: 'text', content: 'No encontré productos con ese nombre.' });
+          return res.json({ type: 'stock', product: r.rows[0] });
+        }
       }
       return res.json({ type: 'text', content: 'Dime el nombre o el ID del producto para consultar el stock.' });
     }
