@@ -57,7 +57,16 @@ async function handleChat(req, res, next) {
         if (r.rows.length === 0) return res.json({ type: 'text', content: 'Producto no encontrado.' });
         return res.json({ type: 'stock', product: r.rows[0] });
       }
-      return res.json({ type: 'text', content: 'Dime el ID del producto para consultar el stock.' });
+      // intentar extraer nombre
+      const nameMatch = message.match(/stock\s+de\s+(.+)/i) || message.match(/stock\s+(.+)/i) || message.match(/existencia\s+de\s+(.+)/i) || message.match(/hay\s+(.+)/i);
+      if (nameMatch) {
+        const nameQuery = nameMatch[1].trim();
+        const q = 'SELECT id, name, stock FROM products WHERE name ILIKE $1 LIMIT 1';
+        const r = await db.query(q, [`%${nameQuery}%`]);
+        if (r.rows.length === 0) return res.json({ type: 'text', content: 'No encontré productos con ese nombre.' });
+        return res.json({ type: 'stock', product: r.rows[0] });
+      }
+      return res.json({ type: 'text', content: 'Dime el nombre o el ID del producto para consultar el stock.' });
     }
 
     // Intención: crear orden (se espera orderItems en body o texto natural)
