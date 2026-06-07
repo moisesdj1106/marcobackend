@@ -60,28 +60,82 @@ async function handleChat(req, res, next) {
       return res.json({ type: 'text', content: 'Dime el ID del producto para consultar el stock.' });
     }
 
-    // Intención: crear orden (se espera orderItems en body) -> delega a rutas de orden ya existentes
+    // Intención: crear orden (se espera orderItems en body o texto natural)
     if (text.includes('crear orden') || text.includes('generar orden') || text.includes('hacer pedido') || text.includes('comprar')) {
-      if (!user) return res.json({ type: 'text', content: 'Debes iniciar sesión para crear una orden.' });
-      if (!orderItems || !Array.isArray(orderItems) || orderItems.length === 0) {
-        return res.json({ type: 'text', content: 'Envíame los productos (orderItems) que quieres comprar: [{ product_id, quantity }].' });
+      if (!user) return res.json({ type: 'text', content: 'Debes iniciar sesión para crear una orden. Inicia sesión y vuelve a intentarlo.' });
+
+      // Normalizar orderItems: puede venir como [{ product_id, quantity }] o [{ name, quantity }]
+      let items = Array.isArray(orderItems) ? orderItems.slice() : [];
+
+      // Si no vienen orderItems estructurados, intentar parsear del texto (ej: "comprar 2 bujía ngk, 1 batería")
+      if ((!items || items.length === 0) && (text.includes('comprar') || text.includes('quiero comprar') || text.includes('compraría') )) {
+        // Extraer porciones separadas por ',' o ' y '
+        const afterComprar = text.split(/comprar|quiero comprar|compraría/)[1] || '';
+        const parts = afterComprar.split(/,| y |;|\band\b/).map(p => p.trim()).filter(Boolean);
+        for (const part of parts) {
+          const m = part.match(/(\d+)\s+(.+)/); // e.g. '2 bujía ngk'
+          if (m) {
+            const q = parseInt(m[1], 10);
+            const name = m[2].trim();
+            items.push({ name, quantity: q });
+          } else {
+            // intentar formato 'Bujía NGK x2' o 'Bujía NGK 2'
+            const m2 = part.match(/(.+?)\s+x?(\d+)$/);
+            if (m2) {
+              items.push({ name: m2[1].trim(), quantity: parseInt(m2[2], 10) });
+            }
+          }
+        }
       }
-      // Reusar lógica de orderController: crearPaymentIntent (pero aquí haremos una creación simple sin Stripe)
+
+      if (!items || items.length === 0) {
+        return res.json({ type: 'text', content: 'Para crear una orden envíame los productos y cantidades. Ejemplos: "Comprar 2 Bujía NGK, 1 Batería Yuasa" o enviar un objeto JSON con `orderItems: [{ name: "Bujía NGK", quantity: 2 }]`.' });
+      }
+
+      // Mapear items por nombre a productos reales si no viene product_id
       const client = await db.pool.connect();
       try {
         await client.query('BEGIN');
         let subtotal = 0;
         const checkedItems = [];
-        for (const item of orderItems) {
-          const pr = await client.query('SELECT * FROM products WHERE id = $1 FOR UPDATE', [item.product_id]);
-          if (pr.rows.length === 0) throw new Error(`Producto ${item.product_id} no existe.`);
-          const product = pr.rows[0];
-          if (product.stock < item.quantity) {
-            throw new Error(`Stock insuficiente para ${product.name}. Disponible: ${product.stock}`);
+        const notFound = [];
+
+        for (const item of items) {
+          let product = null;
+          if (item.product_id) {
+            const pr = await client.query('SELECT * FROM products WHERE id = $1 FOR UPDATE', [item.product_id]);
+            if (pr.rows.length === 0) {
+              notFound.push(item);
+              continue;
+            }
+            product = pr.rows[0];
+          } else if (item.name) {
+            // Buscar por nombre (mejor coincidencia)
+            const pr = await client.query('SELECT * FROM products WHERE name ILIKE $1 ORDER BY stock DESC LIMIT 1 FOR UPDATE', [`%${item.name}%`]);
+            if (pr.rows.length === 0) {
+              notFound.push(item);
+              continue;
+            }
+            product = pr.rows[0];
+          } else {
+            notFound.push(item);
+            continue;
           }
-          subtotal += parseFloat(product.price) * item.quantity;
-          checkedItems.push({ product_id: product.id, quantity: item.quantity, unit_price: parseFloat(product.price) });
+
+          const qty = Number(item.quantity) || 1;
+          if (product.stock < qty) {
+            return res.json({ type: 'text', content: `Stock insuficiente para ${product.name}. Disponible: ${product.stock}, solicitado: ${qty}` });
+          }
+
+          subtotal += parseFloat(product.price) * qty;
+          checkedItems.push({ product_id: product.id, quantity: qty, unit_price: parseFloat(product.price), name: product.name });
         }
+
+        if (notFound.length > 0) {
+          await client.query('ROLLBACK');
+          return res.json({ type: 'text', content: `No encontré los siguientes productos: ${notFound.map(i => i.name || i.product_id).join(', ')}. Revisa los nombres o usa el listado de productos disponibles.` });
+        }
+
         const tax = Number((subtotal * 0.16).toFixed(2));
         const total = Number((subtotal + tax).toFixed(2));
         const insertOrder = `INSERT INTO orders (user_id, status, subtotal, tax_amount, total_amount, billing_name, billing_email, payment_intent_id)
@@ -93,8 +147,8 @@ async function handleChat(req, res, next) {
           await client.query('UPDATE products SET stock = stock - $1 WHERE id = $2', [it.quantity, it.product_id]);
         }
         await client.query('COMMIT');
-        await logAction(user.id, user.email, 'CHAT_CREATED_ORDER', 'orders', orderId, { total });
-        return res.json({ type: 'order', message: 'Orden creada exitosamente.', orderId, total });
+        await logAction(user.id, user.email, 'CHAT_CREATED_ORDER', 'orders', orderId, { total, items: checkedItems.map(i=>({id:i.product_id,name:i.name,qty:i.quantity})) });
+        return res.json({ type: 'order', message: 'Orden creada exitosamente.', orderId, total, items: checkedItems });
       } catch (err) {
         await client.query('ROLLBACK');
         throw err;
@@ -139,8 +193,11 @@ async function handleChat(req, res, next) {
       return res.json({ type: 'admin_stats', today: { total: parseFloat(today.total), orders: parseInt(today.orders_count) }, previous: { total: parseFloat(prev.total), orders: parseInt(prev.orders_count) }, improvement });
     }
 
-    // Caso por defecto: responder con ayuda y capacidades disponibles
-    return res.json({ type: 'text', content: 'Puedo: listar productos disponibles, buscar producto por ID o nombre, consultar stock, crear orden (si estás logueado), y dar info de la empresa. Escribe por ejemplo: "Productos disponibles" o "Stock producto 123".' });
+    // Caso por defecto: responder con ayuda y capacidades disponibles (más directo y con ejemplos)
+    return res.json({
+      type: 'text',
+      content: 'Te puedo ayudar con tareas de la tienda. Ejemplos rápidos:\n• "Productos disponibles" — lista artículos con stock.\n• "Buscar producto bujía NGK" — busca por nombre.\n• "Stock bujía NGK" — consulta existencia.\n• "Comprar 2 Bujía NGK, 1 Batería Yuasa" — crea una orden (debes estar autenticado).\nResponde con el texto como en los ejemplos; si quieres crear una orden también puedes enviar un JSON con `orderItems: [{ name: "Bujía NGK", quantity: 2 }]`.'
+    });
   } catch (error) {
     next(error);
   }
