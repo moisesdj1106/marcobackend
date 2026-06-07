@@ -128,7 +128,7 @@ async function handleChat(req, res, next) {
           }
 
           subtotal += parseFloat(product.price) * qty;
-          checkedItems.push({ product_id: product.id, quantity: qty, unit_price: parseFloat(product.price), name: product.name });
+          checkedItems.push({ product_id: product.id, quantity: qty, unit_price: parseFloat(product.price), name: product.name, stock: product.stock, image_url: product.image_url });
         }
 
         if (notFound.length > 0) {
