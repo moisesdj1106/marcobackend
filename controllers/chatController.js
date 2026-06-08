@@ -18,7 +18,7 @@ async function handleChat(req, res, next) {
 
     // Intención: listar productos disponibles
     if (text.includes('productos disponibles') || text.includes('listar productos') || text.includes('ver productos')) {
-      const q = `SELECT id, name, price, stock, image_url FROM products WHERE stock > 0 ORDER BY id DESC LIMIT 100`;
+      const q = `SELECT id, name, price, stock, image_url FROM products WHERE stock > 0 ORDER BY id ASC LIMIT 100`;
       const result = await db.query(q);
       return res.json({ type: 'list', title: 'Productos disponibles', items: result.rows });
     }
@@ -428,11 +428,14 @@ async function handleChat(req, res, next) {
     if (text.includes('generado') || text.includes('ventas') || text.includes('cuánto se generó') || text.includes('ingresos') || text.includes('recaudación')) {
       // Solo admin
       if (!user || user.role !== 'admin') return res.status(403).json({ type: 'text', content: 'Comando disponible solo para administradores.' });
-      // Hoy
-      const todayQ = `SELECT COALESCE(SUM(total_amount),0) AS total, COUNT(*) AS orders_count FROM orders WHERE status='completed' AND created_at::date = CURRENT_DATE`;
-      const prevQ = `SELECT COALESCE(SUM(total_amount),0) AS total, COUNT(*) AS orders_count FROM orders WHERE status='completed' AND created_at::date = CURRENT_DATE - INTERVAL '1 day'`;
-      const t = await db.query(todayQ);
-      const p = await db.query(prevQ);
+      // Calcular "hoy" y "ayer" usando la zona horaria de la aplicación (por defecto UTC)
+      const tz = process.env.APP_TIMEZONE || 'UTC';
+      // Usamos rangos [start, end) basados en date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE tz)
+      const startTodayExpr = `date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE $1)`;
+      const todayQ = `SELECT COALESCE(SUM(total_amount),0) AS total, COUNT(*) AS orders_count FROM orders WHERE status='completed' AND (created_at AT TIME ZONE $1) >= ${startTodayExpr} AND (created_at AT TIME ZONE $1) < (${startTodayExpr} + INTERVAL '1 day')`;
+      const prevQ = `SELECT COALESCE(SUM(total_amount),0) AS total, COUNT(*) AS orders_count FROM orders WHERE status='completed' AND (created_at AT TIME ZONE $1) >= (${startTodayExpr} - INTERVAL '1 day') AND (created_at AT TIME ZONE $1) < ${startTodayExpr}`;
+      const t = await db.query(todayQ, [tz]);
+      const p = await db.query(prevQ, [tz]);
       const today = t.rows[0];
       const prev = p.rows[0];
       const improvement = prev.total == 0 ? null : Number(((today.total - prev.total) / prev.total * 100).toFixed(2));
